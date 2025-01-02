@@ -36,7 +36,7 @@ class GithubProvider(GitProvider):
             self.installation_id = None
         self.max_comment_chars = 65000
         self.base_url = get_settings().get("GITHUB.BASE_URL", "https://api.github.com").rstrip("/") # "https://api.github.com"
-        self.base_url_html = self.base_url.split("api/")[0].rstrip("/") if "api/" in self.base_url else "https://github.com"
+        self.base_url_html = self.base_url.split("api/")[0].rstrip("/") if "api/" in self.base_url else self.base_url
         self.github_client = self._get_github_client()
         self.repo = None
         self.pr_num = None
@@ -638,11 +638,18 @@ class GithubProvider(GitProvider):
 
     def _parse_pr_url(self, pr_url: str) -> Tuple[str, int]:
         parsed_url = urlparse(pr_url)
+        path_parts = parsed_url.path.strip('/').split('/')
+        if 'github.com' not in pr_url:
+            repo_name = '/'.join(path_parts[3:5])
+            try:
+                pr_number = int(path_parts[6])
+            except ValueError as e:
+                raise ValueError("Unable to convert PR number to integer") from e
+            return repo_name, pr_number          
 
         if parsed_url.path.startswith('/api/v3'):
             parsed_url = urlparse(pr_url.replace("/api/v3", ""))
 
-        path_parts = parsed_url.path.strip('/').split('/')
         if 'api.github.com' in parsed_url.netloc or '/api/v3' in pr_url:
             if len(path_parts) < 5 or path_parts[3] != 'pulls':
                 raise ValueError("The provided URL does not appear to be a GitHub PR URL")
@@ -693,7 +700,7 @@ class GithubProvider(GitProvider):
         return repo_name, issue_number
 
     def _get_github_client(self):
-        deployment_type = get_settings().get("GITHUB.DEPLOYMENT_TYPE", "user")
+        deployment_type = get_settings().get("GITHUB.DEPLOYMENT_TYPE", "app")
 
         if deployment_type == 'app':
             try:
@@ -701,11 +708,20 @@ class GithubProvider(GitProvider):
                 app_id = get_settings().github.app_id
             except AttributeError as e:
                 raise ValueError("GitHub app ID and private key are required when using GitHub app deployment") from e
-            if not self.installation_id:
-                raise ValueError("GitHub app installation ID is required when using GitHub app deployment")
+            installation_id=  self.installation_id
+            if not installation_id:
+                try:
+                    installation_id = get_settings().github.installation_id
+                except:
+                    raise ValueError("GitHub app installation ID is required when using GitHub app deployment")
+
             auth = AppAuthentication(app_id=app_id, private_key=private_key,
-                                     installation_id=self.installation_id)
-            return Github(app_auth=auth, base_url=self.base_url)
+                                     installation_id=installation_id)
+            # Changes for GHE
+            if 'github.com' in self.base_url:
+                return Github(app_auth=auth, base_url=self.base_url)
+            else:
+                return Github(auth=auth, base_url=self.base_url+ '/api/v3')
 
         if deployment_type == 'user':
             try:
@@ -714,7 +730,10 @@ class GithubProvider(GitProvider):
                 raise ValueError(
                     "GitHub token is required when using user deployment. See: "
                     "https://github.com/Codium-ai/pr-agent#method-2-run-from-source") from e
-            return Github(auth=Auth.Token(token), base_url=self.base_url)
+            if 'github.com' in self.base_url:
+                return Github(auth=Auth.Token(token), base_url=self.base_url)
+            else:
+                return Github(auth=Auth.Token(token), base_url=self.base_url+ '/api/v3')
 
     def _get_repo(self):
         if hasattr(self, 'repo_obj') and \
